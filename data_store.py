@@ -1,127 +1,184 @@
-"""
-data_store.py
-=============
-Centralised helpers for reading and writing card data (JSON files + CSV export).
-All pages import from here so the data layer is in one place.
-"""
+# data_store.py
+# =============
+# Centralised helpers for reading/writing data. Abstracts local vs Google Drive storage.
 
 import csv
 import json
+import io
 from datetime import datetime, timezone
 from pathlib import Path
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+import streamlit as st
 
+# --- Paths & Constants ---
 DATA_DIR = Path(__file__).parent / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
 TRANSCRIPTIONS_DIR = DATA_DIR / "transcriptions"
 EXPORT_CSV = DATA_DIR / "corrections_export.csv"
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
-
-# Statuses
-STATUS_PENDING  = "pending"
+STATUS_PENDING = "pending"
 STATUS_REVIEWED = "reviewed"
-STATUS_FLAGGED  = "flagged"
-STATUS_ERROR    = "error"
-
-# JSON fields shown in the review editor
+STATUS_FLAGGED = "flagged"
+STATUS_ERROR = "error"
 EDITABLE_FIELDS = [
-    "Subject_Heading",
-    "Museum_References",
-    "Object_Types",
-    "Egyptian_Titles",
-    "Full_Transcription",
-    "Confidence_Notes",
+    "Subject_Heading", "Museum_References", "Object_Types",
+    "Egyptian_Titles", "Full_Transcription", "Confidence_Notes"
 ]
+CSV_FIELDNAMES = ["image", "reviewed_at", "status"] + EDITABLE_FIELDS + ["Hieroglyphs_Present"]
 
-# ── Ensure directories exist ──────────────────────────────────────────────────
-
+# Ensure local dirs exist (used as fallback and for CSV export)
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 TRANSCRIPTIONS_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# ── Card discovery ────────────────────────────────────────────────────────────
+# --- Backend helper ---
+
+def _get_backend():
+    """Return a GDriveStore if credentials are available, else None (local mode)."""
+    creds = st.session_state.get("gdrive_creds")
+    if creds:
+        try:
+            from gdrive_store import GDriveStore
+            return GDriveStore(creds)
+        except Exception:
+            return None
+    return None
+
+
+# --- Unified I/O ---
 
 def list_cards() -> list[dict]:
-    """
-    Return a list of card metadata dicts, one per uploaded image.
-    Each dict contains: image_path, json_path, name, status, has_json.
-    """
+    backend = _get_backend()
     cards = []
-    for img in sorted(UPLOADS_DIR.iterdir()):
-        if img.is_file() and img.suffix.lower() in IMAGE_EXTENSIONS:
-            json_path = TRANSCRIPTIONS_DIR / (img.stem + ".json")
-            data = load_json(json_path) if json_path.exists() else {}
+    if backend:
+        image_files = backend.list_files(backend.uploads_id)
+        json_files = {f["name"]: f for f in backend.list_files(backend.transcriptions_id)}
+        for img in image_files:
+            if Path(img["name"]).suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            stem = Path(img["name"]).stem
+            json_file = json_files.get(f"{stem}.json")
+            data = {}
+            if json_file:
+                try:
+                    data = json.loads(backend.get_file_content(json_file["id"]))
+                except Exception:
+                    data = {}
             cards.append({
-                "image_path": img,
+                "image_id": img["id"],
+                "json_id": json_file["id"] if json_file else None,
+                "name": img["name"],
+                "stem": stem,
+                "status": data.get("_review_status", STATUS_PENDING) if data else "not_transcribed",
+                "has_json": bool(json_file),
+                "has_error": "error" in data,
+                "has_hieroglyphs": bool(data.get("Hieroglyphs_Present", False)),
+            })
+    else:
+        for img_path in sorted(UPLOADS_DIR.iterdir()):
+            if not img_path.is_file() or img_path.suffix.lower() not in IMAGE_EXTENSIONS:
+                continue
+            json_path = TRANSCRIPTIONS_DIR / (img_path.stem + ".json")
+            data = {}
+            if json_path.exists():
+                try:
+                    data = json.loads(json_path.read_text(encoding="utf-8"))
+                except Exception:
+                    data = {}
+            cards.append({
+                "image_path": img_path,
                 "json_path": json_path,
-                "name": img.name,
-                "stem": img.stem,
+                "name": img_path.name,
+                "stem": img_path.stem,
                 "status": data.get("_review_status", STATUS_PENDING) if data else "not_transcribed",
                 "has_json": json_path.exists(),
                 "has_error": "error" in data,
                 "has_hieroglyphs": bool(data.get("Hieroglyphs_Present", False)),
             })
-    return cards
+    return sorted(cards, key=lambda c: c["name"])
 
+
+def load_json(card: dict) -> dict:
+    backend = _get_backend()
+    try:
+        if backend and card.get("json_id"):
+            return json.loads(backend.get_file_content(card["json_id"]))
+        elif not backend and card.get("json_path") and card["json_path"].exists():
+            return json.loads(card["json_path"].read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def save_json(card_stem: str, data: dict):
+    backend = _get_backend()
+    filename = f"{card_stem}.json"
+    content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+    if backend:
+        from googleapiclient.http import MediaIoBaseUpload
+        # Delete existing file first to avoid duplicates
+        json_files = {f["name"]: f for f in backend.list_files(backend.transcriptions_id)}
+        existing = json_files.get(filename)
+        if existing:
+            try:
+                backend.service.files().delete(fileId=existing["id"]).execute()
+            except Exception:
+                pass
+        media = MediaIoBaseUpload(io.BytesIO(content), mimetype="application/json")
+        file_metadata = {"name": filename, "parents": [backend.transcriptions_id]}
+        backend.service.files().create(body=file_metadata, media_body=media).execute()
+    else:
+        (TRANSCRIPTIONS_DIR / filename).write_bytes(content)
+
+
+def get_image_bytes(card: dict) -> bytes:
+    backend = _get_backend()
+    try:
+        if backend and card.get("image_id"):
+            return backend.get_file_content(card["image_id"])
+        elif not backend and card.get("image_path"):
+            return card["image_path"].read_bytes()
+    except Exception:
+        pass
+    return b""
+
+
+def save_uploaded_file(uploaded_file):
+    backend = _get_backend()
+    if backend:
+        from googleapiclient.http import MediaIoBaseUpload
+        content = uploaded_file.getbuffer()
+        media = MediaIoBaseUpload(io.BytesIO(content), mimetype="application/octet-stream")
+        file_metadata = {"name": uploaded_file.name, "parents": [backend.uploads_id]}
+        backend.service.files().create(body=file_metadata, media_body=media).execute()
+    else:
+        (UPLOADS_DIR / uploaded_file.name).write_bytes(uploaded_file.getbuffer())
+
+
+# --- Other helpers ---
 
 def count_by_status() -> dict:
-    """Return counts keyed by status string."""
-    counts = {
-        "total": 0,
-        STATUS_PENDING: 0,
-        STATUS_REVIEWED: 0,
-        STATUS_FLAGGED: 0,
-        STATUS_ERROR: 0,
-        "not_transcribed": 0,
-    }
+    counts = {"total": 0, STATUS_PENDING: 0, STATUS_REVIEWED: 0, STATUS_FLAGGED: 0, STATUS_ERROR: 0, "not_transcribed": 0}
     for card in list_cards():
         counts["total"] += 1
         s = card["status"]
-        if s in counts:
-            counts[s] += 1
-        else:
-            counts[STATUS_PENDING] += 1
+        counts[s] = counts.get(s, 0) + 1
     return counts
 
 
-# ── JSON I/O ──────────────────────────────────────────────────────────────────
-
-def load_json(json_path: Path) -> dict:
-    try:
-        return json.loads(json_path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-
-
-def save_json(json_path: Path, data: dict) -> None:
-    json_path.write_text(
-        json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-
-
-# ── List helpers ──────────────────────────────────────────────────────────────
-
 def list_to_str(value) -> str:
-    """Convert a JSON list to a newline-separated string for text areas."""
     if isinstance(value, list):
         return "\n".join(str(v) for v in value)
     return str(value) if value is not None else ""
 
 
 def str_to_list(text: str) -> list:
-    """Convert a newline-separated string back to a cleaned list."""
     return [line.strip() for line in text.splitlines() if line.strip()]
 
 
-# ── CSV export ────────────────────────────────────────────────────────────────
-
-CSV_FIELDNAMES = ["image", "reviewed_at", "status"] + EDITABLE_FIELDS + ["Hieroglyphs_Present"]
-
-
-def append_to_csv(image_name: str, data: dict) -> None:
-    """Append one reviewed record to the master CSV export."""
+def append_to_csv(image_name: str, data: dict):
     file_exists = EXPORT_CSV.exists()
     with open(EXPORT_CSV, "a", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES, extrasaction="ignore")
@@ -139,14 +196,12 @@ def append_to_csv(image_name: str, data: dict) -> None:
         writer.writerow(row)
 
 
-def rebuild_csv() -> None:
-    """Regenerate the full CSV from all reviewed JSON files."""
+def rebuild_csv() -> Path:
     reviewed = []
     for card in list_cards():
         if card["status"] in (STATUS_REVIEWED, STATUS_FLAGGED) and card["has_json"]:
-            data = load_json(card["json_path"])
+            data = load_json(card)
             reviewed.append((card["name"], data))
-
     with open(EXPORT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=CSV_FIELDNAMES, extrasaction="ignore")
         writer.writeheader()
@@ -161,3 +216,4 @@ def rebuild_csv() -> None:
                 val = data.get(field)
                 row[field] = " | ".join(val) if isinstance(val, list) else (val or "")
             writer.writerow(row)
+    return EXPORT_CSV
