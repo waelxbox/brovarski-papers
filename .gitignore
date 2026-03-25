@@ -1,0 +1,22 @@
+# Data directories — not committed to git
+data/uploads/
+data/transcriptions/
+data/corrections_export.csv
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.Python
+
+# Streamlit secrets (never commit these)
+.streamlit/secrets.toml
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Virtual environments
+venv/
+.venv/
+env/
