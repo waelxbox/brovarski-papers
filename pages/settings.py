@@ -8,11 +8,13 @@ from transcribe_engine import DEFAULT_MODEL, build_client
 
 
 AVAILABLE_MODELS = [
-    "gemini-2.5-flash",
+    "gemini-3.1-pro-preview",
+    "gemini-3-flash-preview",
     "gemini-2.5-pro",
+    "gemini-2.5-flash",
     "gemini-2.0-flash",
-    "claude-3-5-sonnet-20241022",
     "claude-3-7-sonnet-20250219",
+    "claude-3-5-sonnet-20241022",
     "gpt-4o",
     "gpt-4o-mini",
 ]
@@ -102,11 +104,13 @@ def render():
     )
 
     model_info = {
-        "gemini-2.5-flash":           ("Fast",   "~$0.001/card",  "Best for most cards"),
+        "gemini-3.1-pro-preview":     ("Slow",   "~$0.012/card",  "Most advanced reasoning (Preview)"),
+        "gemini-3-flash-preview":     ("Medium", "~$0.003/card",  "Pro-level intelligence at Flash speed"),
         "gemini-2.5-pro":             ("Slow",   "~$0.01/card",   "Best for difficult handwriting"),
+        "gemini-2.5-flash":           ("Fast",   "~$0.001/card",  "Best for most cards"),
         "gemini-2.0-flash":           ("Fast",   "~$0.001/card",  "Previous generation Gemini"),
-        "claude-3-5-sonnet-20241022": ("Medium", "~$0.003/card",  "Best handwriting accuracy"),
         "claude-3-7-sonnet-20250219": ("Medium", "~$0.004/card",  "Latest Claude, highest accuracy"),
+        "claude-3-5-sonnet-20241022": ("Medium", "~$0.003/card",  "Best handwriting accuracy"),
         "gpt-4o":                     ("Medium", "~$0.005/card",  "OpenAI alternative"),
         "gpt-4o-mini":                ("Fast",   "~$0.0005/card", "OpenAI budget option"),
     }
