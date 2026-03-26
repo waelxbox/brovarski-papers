@@ -1,27 +1,46 @@
 # pages/upload.py
 
 import streamlit as st
-from data_store import list_cards, save_uploaded_file, get_image_bytes, save_json, STATUS_ERROR
+from data_store import (
+    list_cards, save_uploaded_file, get_image_bytes, save_json,
+    STATUS_PENDING, STATUS_REVIEWED, STATUS_FLAGGED, STATUS_ERROR,
+)
 from transcribe_engine import build_client, transcribe_image, DEFAULT_MODEL
+
 
 def _get_client():
     key = st.session_state.get("api_key", "")
     url = st.session_state.get("base_url", "")
-    if not key: return None
+    if not key:
+        return None
     return build_client(api_key=key, base_url=url or None)
+
 
 def render():
     st.title("Upload & Transcribe")
-    st.caption("Upload scanned index-card images. Each image is automatically sent to the Gemini AI for transcription and placed in the review queue.")
+    st.caption(
+        "Upload scanned index-card images. Each image is automatically sent to "
+        "the Gemini AI for transcription and placed in the review queue."
+    )
     st.divider()
 
     if not st.session_state.get("api_key"):
-        st.error("No API key configured. Please go to **Settings** and enter your Gemini API key before uploading cards.")
-        if st.button("Go to Settings"): st.session_state["active_page"] = "Settings"; st.rerun()
+        st.error(
+            "No API key configured. Please go to **Settings** and enter your "
+            "Gemini API key before uploading cards."
+        )
+        if st.button("Go to Settings"):
+            st.session_state["active_page"] = "Settings"
+            st.rerun()
         return
 
+    # ── Section 1: Upload ────────────────────────────────────────────────────
     st.subheader("1. Upload Images")
-    uploaded_files = st.file_uploader("Drag and drop scanned card images here, or click to browse", type=["jpg", "jpeg", "png", "tif", "tiff", "bmp", "webp"], accept_multiple_files=True)
+    uploaded_files = st.file_uploader(
+        "Drag and drop scanned card images here, or click to browse",
+        type=["jpg", "jpeg", "png", "tif", "tiff", "bmp", "webp"],
+        accept_multiple_files=True,
+    )
     model = st.session_state.get("model", DEFAULT_MODEL)
     skip_existing = st.checkbox("Skip cards that have already been transcribed", value=True)
 
@@ -29,9 +48,12 @@ def render():
         st.info(f"**{len(uploaded_files)}** file(s) selected. Click the button below to save and transcribe.")
         if st.button("Save & Transcribe All", type="primary", use_container_width=True):
             client = _get_client()
-            if client is None: st.error("API client could not be created. Check your API key in Settings."); return
+            if client is None:
+                st.error("API client could not be created. Check your API key in Settings.")
+                return
 
-            for uf in uploaded_files: save_uploaded_file(uf)
+            for uf in uploaded_files:
+                save_uploaded_file(uf)
             st.success(f"Saved {len(uploaded_files)} image(s) to storage.")
             st.divider()
 
@@ -43,6 +65,9 @@ def render():
 
             cards_to_process = list_cards()
             total = len(cards_to_process)
+            if total == 0:
+                st.warning("No cards found in storage after upload. Please try again.")
+                return
 
             for i, card in enumerate(cards_to_process):
                 if skip_existing and card["has_json"]:
@@ -51,26 +76,47 @@ def render():
                     progress_bar.progress((i + 1) / total)
                     continue
 
-                status_area.info(f"Transcribing **{card['name']}** ({i+1}/{total})…")
-                image_bytes = get_image_bytes(card)
-                result = transcribe_image(image_bytes, client, model=model, filename=card["name"])
-                save_json(card["stem"], result)
+                status_area.info(f"Transcribing **{card['name']}** ({i + 1}/{total})…")
+                try:
+                    image_bytes = get_image_bytes(card)
+                    if not image_bytes:
+                        log_lines.append(f"⚠️ Could not read image: **{card['name']}**")
+                        log_area.markdown("\n\n".join(log_lines))
+                        progress_bar.progress((i + 1) / total)
+                        continue
 
-                if "error" in result: log_lines.append(f"❌ Error on **{card['name']}**: {result['error']}")
-                elif result.get("Hieroglyphs_Present"): log_lines.append(f"✅ Done: **{card['name']}** — ⚠️ Hieroglyphs detected")
-                else: log_lines.append(f"✅ Done: **{card['name']}** — *{result.get('Subject_Heading') or '(no heading)'}*")
-                
+                    result = transcribe_image(
+                        image_bytes, client, model=model, filename=card["name"]
+                    )
+                    save_json(card["stem"], result)
+
+                    if "error" in result:
+                        log_lines.append(f"❌ Error on **{card['name']}**: {result['error']}")
+                    elif result.get("Hieroglyphs_Present"):
+                        log_lines.append(f"✅ Done: **{card['name']}** — ⚠️ Hieroglyphs detected")
+                    else:
+                        heading = result.get("Subject_Heading") or "(no heading)"
+                        log_lines.append(f"✅ Done: **{card['name']}** — *{heading}*")
+
+                except Exception as exc:
+                    log_lines.append(f"❌ Unexpected error on **{card['name']}**: {exc}")
+
                 log_area.markdown("\n\n".join(log_lines))
                 progress_bar.progress((i + 1) / total)
 
-            status_area.success("All cards transcribed! They are now in the review queue.")
+            status_area.success("All cards processed! They are now in the review queue.")
             st.balloons()
-            if st.button("Go to Review Cards →", type="primary"): st.session_state["active_page"] = "Review Cards"; st.rerun()
+            if st.button("Go to Review Cards →", type="primary"):
+                st.session_state["active_page"] = "Review Cards"
+                st.rerun()
 
+    # ── Section 2: Card table ────────────────────────────────────────────────
     st.divider()
     st.subheader("Uploaded Cards")
     cards = list_cards()
-    if not cards: st.info("No cards uploaded yet."); return
+    if not cards:
+        st.info("No cards uploaded yet.")
+        return
 
     col1, col2 = st.columns([3, 1])
     with col2:
@@ -81,18 +127,37 @@ def render():
                 if error_cards:
                     with st.spinner(f"Re-transcribing {len(error_cards)} error card(s)…"):
                         for c in error_cards:
-                            image_bytes = get_image_bytes(c)
-                            result = transcribe_image(image_bytes, client, model=model, filename=card["name"])
-                            save_json(c["stem"], result)
-                    st.success("Done. Refresh to see updated statuses."); st.rerun()
-                else: st.info("No error cards to retry.")
+                            try:
+                                image_bytes = get_image_bytes(c)
+                                result = transcribe_image(
+                                    image_bytes, client, model=model, filename=c["name"]
+                                )
+                                save_json(c["stem"], result)
+                            except Exception as exc:
+                                st.warning(f"Error retranscribing {c['name']}: {exc}")
+                    st.success("Done. Refresh to see updated statuses.")
+                    st.rerun()
+                else:
+                    st.info("No error cards to retry.")
 
+    status_label = {
+        "not_transcribed": "⬜ Not transcribed",
+        STATUS_PENDING:    "🟡 Pending review",
+        STATUS_REVIEWED:   "✅ Reviewed",
+        STATUS_FLAGGED:    "🚩 Flagged",
+        STATUS_ERROR:      "❌ Error",
+    }
     rows = []
     for c in cards:
-        status_icon = {"not_transcribed": "⬜ Not transcribed", STATUS_PENDING: "🟡 Pending review", "reviewed": "✅ Reviewed", "flagged": "🚩 Flagged", "error": "❌ Error"}.get(c["status"], c["status"])
-        rows.append({"Image": c["name"], "Status": status_icon, "Hieroglyphs": "⚠️ Yes" if c["has_hieroglyphs"] else "—", "JSON": "✓" if c["has_json"] else "✗"})
+        rows.append({
+            "Image":       c["name"],
+            "Status":      status_label.get(c["status"], c["status"]),
+            "Hieroglyphs": "⚠️ Yes" if c["has_hieroglyphs"] else "—",
+            "JSON":        "✓" if c["has_json"] else "✗",
+        })
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
+    # ── Section 3: Retranscribe single card ──────────────────────────────────
     st.divider()
     st.subheader("Retranscribe a Single Card")
     selected = st.selectbox("Select card to retranscribe", [c["name"] for c in cards])
@@ -101,8 +166,16 @@ def render():
         if client:
             card = next(c for c in cards if c["name"] == selected)
             with st.spinner(f"Transcribing {selected}…"):
-                image_bytes = get_image_bytes(card)
-                result = transcribe_image(image_bytes, client, model=model, filename=card["name"])
-                save_json(card["stem"], result)
-            if "error" in result: st.error(f"Transcription failed: {result['error']}")
-            else: st.success(f"Done! **{selected}** has been transcribed and is ready for review."); st.rerun()
+                try:
+                    image_bytes = get_image_bytes(card)
+                    result = transcribe_image(
+                        image_bytes, client, model=model, filename=card["name"]
+                    )
+                    save_json(card["stem"], result)
+                    if "error" in result:
+                        st.error(f"Transcription failed: {result['error']}")
+                    else:
+                        st.success(f"Done! **{selected}** has been transcribed and is ready for review.")
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"Unexpected error: {exc}")

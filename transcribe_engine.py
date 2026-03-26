@@ -4,7 +4,9 @@ transcribe_engine.py
 Core AI transcription logic shared by the upload pipeline and the app.
 Sends a single image to the Gemini API and returns a structured JSON dict.
 
-Accepts either a file Path OR raw bytes as the image input.
+image_input can be:
+  - a pathlib.Path or str  → read from disk
+  - raw bytes              → encode directly (use filename= hint for MIME detection)
 """
 
 import base64
@@ -20,6 +22,14 @@ from openai import OpenAI
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".webp"}
 
 DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+
+_MIME_MAP = {
+    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".png": "image/png",
+    ".tif": "image/tiff", ".tiff": "image/tiff",
+    ".bmp": "image/bmp",
+    ".webp": "image/webp",
+}
 
 SYSTEM_PROMPT = """You are an expert Egyptologist with deep knowledge of Old Kingdom
 administrative titles, museum cataloguing conventions, and standard Egyptological
@@ -60,62 +70,56 @@ Confidence_Notes: briefly flag any words you are uncertain about, e.g.
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _encode_image(image_input, filename: str = "card.jpg") -> tuple:
-    """
-    Return (base64_data, mime_type) for the given image.
+def _mime_from_filename(filename: str) -> str:
+    """Return MIME type based on file extension, defaulting to image/jpeg."""
+    ext = Path(filename).suffix.lower()
+    return _MIME_MAP.get(ext, "image/jpeg")
 
-    Accepts:
-      - a Path object  (reads from disk, detects MIME from extension)
-      - raw bytes      (detects MIME by sniffing magic bytes; falls back to image/jpeg)
-    """
-    mime_map = {
-        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
-        ".png": "image/png",
-        ".tif": "image/tiff", ".tiff": "image/tiff",
-        ".bmp": "image/bmp",
-        ".webp": "image/webp",
-    }
 
+def _mime_from_bytes(data: bytes) -> str:
+    """Sniff the first few bytes to determine image MIME type."""
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return "image/png"
+    if data[:2] == b"\xff\xd8":
+        return "image/jpeg"
+    if data[:4] == b"RIFF" or data[8:12] == b"WEBP":
+        return "image/webp"
+    if data[:2] in (b"MM", b"II"):
+        return "image/tiff"
+    if data[:2] == b"BM":
+        return "image/bmp"
+    return "image/jpeg"  # safe default
+
+
+def _encode_image(image_input, filename: str = "card.jpg"):
+    """
+    Return (base64_string, mime_type, source_name).
+
+    Accepts a Path/str (reads from disk) or raw bytes.
+    """
     if isinstance(image_input, (str, Path)):
-        # File path mode
-        image_path = Path(image_input)
-        mime = mime_map.get(image_path.suffix.lower(), "image/jpeg")
-        with open(image_path, "rb") as f:
-            raw_bytes = f.read()
-        source_name = image_path.name
+        p = Path(image_input)
+        raw = p.read_bytes()
+        mime = _mime_from_filename(p.name)
+        source_name = p.name
     else:
-        # Raw bytes mode — sniff magic bytes to determine MIME type
-        raw_bytes = bytes(image_input)
-        if raw_bytes[:8] == b"\x89PNG\r\n\x1a\n":
-            mime = "image/png"
-        elif raw_bytes[:4] in (b"RIFF", b"WEBP"):
-            mime = "image/webp"
-        elif raw_bytes[:2] in (b"MM", b"II"):
-            mime = "image/tiff"
-        elif raw_bytes[:2] == b"BM":
-            mime = "image/bmp"
-        else:
-            # Default: JPEG (covers b'\xff\xd8\xff' and unknown formats)
-            mime = "image/jpeg"
-        # Try to get MIME from filename hint if available
+        # Must be bytes-like
+        raw = bytes(image_input)
+        # Prefer extension hint from filename, fall back to magic-byte sniff
         ext = Path(filename).suffix.lower()
-        if ext in mime_map:
-            mime = mime_map[ext]
+        mime = _MIME_MAP.get(ext) or _mime_from_bytes(raw)
         source_name = filename
 
-    data = base64.standard_b64encode(raw_bytes).decode("utf-8")
-    return data, mime, source_name
+    b64 = base64.standard_b64encode(raw).decode("utf-8")
+    return b64, mime, source_name
 
 
 def build_client(api_key: str | None = None, base_url: str | None = None) -> OpenAI:
-    """
-    Build an OpenAI client pointing at the Gemini endpoint.
-    Falls back to environment variables if parameters are not supplied.
-    """
+    """Build an OpenAI client pointing at the Gemini endpoint."""
     key = api_key or os.environ.get("OPENAI_API_KEY", "")
     url = base_url or os.environ.get(
         "OPENAI_BASE_URL",
-        "https://generativelanguage.googleapis.com/v1beta/openai/"
+        "https://generativelanguage.googleapis.com/v1beta/openai/",
     )
     return OpenAI(api_key=key, base_url=url)
 
@@ -131,11 +135,11 @@ def transcribe_image(
     """
     Send one image to the Gemini API and return the parsed JSON dict.
 
-    image_input: Path/str to an image file, OR raw bytes.
-    filename:    Hint for the source filename when passing raw bytes
-                 (used in metadata and MIME detection).
+    image_input : Path/str to an image file, OR raw bytes.
+    filename    : Filename hint used for MIME detection and metadata when
+                  image_input is raw bytes.
 
-    Always returns a dict; on failure it contains an 'error' key.
+    Always returns a dict. On failure the dict contains an 'error' key.
     """
     b64, mime, source_name = _encode_image(image_input, filename=filename)
 
