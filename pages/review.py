@@ -62,7 +62,7 @@ def render():
     st.markdown(f"**Card {idx + 1} of {len(filtered)}** &nbsp;|&nbsp; {badge_map.get(status, '🟡 Pending')} &nbsp;|&nbsp; Model: `{data.get('_model', 'unknown')}`")
 
     if data.get("Hieroglyphs_Present"):
-        st.warning("**⚠️ Hieroglyphs Detected** — This card contains hand-drawn hieroglyphs marked with `[HIEROGLYPHS_PRESENT]`. Manual encoding by a specialist is required.", icon="𓀀")
+        st.warning("**Hieroglyphs Detected** — This card contains hand-drawn hieroglyphs marked with [HIEROGLYPHS_PRESENT]. Manual encoding by a specialist is required.")
     if "error" in data:
         st.error(f"**Transcription Error:** {data['error']}\n\nYou can still manually enter the transcription in the fields below, or go to **Upload & Transcribe** to retry.")
 

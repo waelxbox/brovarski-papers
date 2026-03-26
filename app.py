@@ -77,18 +77,18 @@ with st.sidebar:
 
     # Google Drive status indicator
     if st.session_state.get("gdrive_creds"):
-        st.success("Google Drive connected", icon="☁️")
+        st.success("Google Drive connected")
     else:
-        st.info("Storage: Local (temporary)", icon="💾")
+        st.info("Storage: Local (temporary)")
         if st.button("Connect Google Drive", use_container_width=True):
             st.session_state["active_page"] = "Google Drive"
             st.rerun()
 
     st.divider()
     if st.session_state["api_key"]:
-        st.success("API key configured", icon="✅")
+        st.success("API key configured")
     else:
-        st.warning("No API key set", icon="⚠️")
+        st.warning("No API key set")
         if st.button("Go to Settings", use_container_width=True):
             st.session_state["active_page"] = "Settings"
             st.rerun()
