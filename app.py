@@ -34,17 +34,42 @@ st.markdown("""
 
 
 def _init_state():
+    # Structural defaults
     defaults = {
-        "api_key": os.environ.get("OPENAI_API_KEY", ""),
-        "base_url": os.environ.get("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/"),
-        "model": os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+        "api_key": "",
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
+        "model": "gemini-2.5-flash",
         "review_index": 0,
         "review_filter": "Pending only",
         "active_page": "Dashboard",
+        "_secrets_loaded": False,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
+
+    # Auto-load API credentials from Streamlit secrets / env vars on first render.
+    # This means the key works immediately on every page — not just after visiting
+    # Settings and clicking Save.
+    if not st.session_state["_secrets_loaded"]:
+        def _get(key, fallback=""):
+            try:
+                return st.secrets.get(key, os.environ.get(key, fallback))
+            except Exception:
+                return os.environ.get(key, fallback)
+
+        api_key  = _get("OPENAI_API_KEY")
+        base_url = _get("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+        model    = _get("GEMINI_MODEL", "gemini-2.5-flash")
+
+        if api_key:
+            st.session_state["api_key"]  = api_key
+        if base_url:
+            st.session_state["base_url"] = base_url
+        if model:
+            st.session_state["model"]    = model
+
+        st.session_state["_secrets_loaded"] = True
 
 _init_state()
 

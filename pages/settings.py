@@ -2,20 +2,32 @@
 pages/settings.py  –  API key, model, and app configuration
 """
 
+import os
 import streamlit as st
-from transcribe_engine import DEFAULT_MODEL
+from transcribe_engine import DEFAULT_MODEL, build_client
 
 
 AVAILABLE_MODELS = [
     "gemini-2.5-flash",
     "gemini-2.5-pro",
     "gemini-2.0-flash",
+    "claude-3-5-sonnet-20241022",
+    "claude-3-7-sonnet-20250219",
     "gpt-4o",
     "gpt-4o-mini",
 ]
 
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 OPENAI_BASE_URL = "https://api.openai.com/v1"
+CLAUDE_BASE_URL = "https://api.anthropic.com/v1/"
+
+
+def _detect_provider(base_url: str) -> str:
+    if "anthropic" in base_url:
+        return "Anthropic Claude"
+    if "openai.com" in base_url:
+        return "OpenAI"
+    return "Google Gemini (recommended)"
 
 
 def render():
@@ -26,12 +38,15 @@ def render():
     # ── API Configuration ─────────────────────────────────────────────────────
     st.subheader("API Configuration")
 
+    current_url = st.session_state.get("base_url", GEMINI_BASE_URL)
+    provider_default = _detect_provider(current_url)
+    provider_options = ["Google Gemini (recommended)", "Anthropic Claude", "OpenAI"]
+
     api_provider = st.radio(
         "API Provider",
-        ["Google Gemini (recommended)", "OpenAI"],
-        index=0,
+        provider_options,
+        index=provider_options.index(provider_default),
         horizontal=True,
-        help="Gemini models are recommended for handwriting recognition accuracy.",
     )
 
     if api_provider == "Google Gemini (recommended)":
@@ -41,6 +56,13 @@ def render():
             "Processing 10,000 cards costs approximately $5–15 with Gemini Flash."
         )
         default_url = GEMINI_BASE_URL
+    elif api_provider == "Anthropic Claude":
+        st.info(
+            "Get a Claude API key at "
+            "[console.anthropic.com](https://console.anthropic.com). "
+            "Claude 3.5 Sonnet is the most accurate model for handwritten academic text."
+        )
+        default_url = CLAUDE_BASE_URL
     else:
         st.info("Enter your OpenAI API key from [platform.openai.com](https://platform.openai.com).")
         default_url = OPENAI_BASE_URL
@@ -73,17 +95,20 @@ def render():
         index=model_idx,
         help=(
             "**gemini-2.5-flash** — Fast and cheap, excellent for most cards. "
-            "**gemini-2.5-pro** — Slower and more expensive, best for difficult handwriting. "
-            "**gpt-4o** — OpenAI alternative, requires an OpenAI API key."
+            "**gemini-2.5-pro** — Slower, best for difficult handwriting. "
+            "**claude-3-5-sonnet** — Best overall accuracy on messy handwriting. "
+            "**gpt-4o** — OpenAI alternative."
         ),
     )
 
     model_info = {
-        "gemini-2.5-flash": ("Fast", "~$0.001/card", "Best for most cards"),
-        "gemini-2.5-pro":   ("Slow", "~$0.01/card",  "Best for difficult handwriting"),
-        "gemini-2.0-flash": ("Fast", "~$0.001/card",  "Previous generation Gemini"),
-        "gpt-4o":           ("Medium", "~$0.005/card", "OpenAI alternative"),
-        "gpt-4o-mini":      ("Fast", "~$0.0005/card",  "OpenAI budget option"),
+        "gemini-2.5-flash":           ("Fast",   "~$0.001/card",  "Best for most cards"),
+        "gemini-2.5-pro":             ("Slow",   "~$0.01/card",   "Best for difficult handwriting"),
+        "gemini-2.0-flash":           ("Fast",   "~$0.001/card",  "Previous generation Gemini"),
+        "claude-3-5-sonnet-20241022": ("Medium", "~$0.003/card",  "Best handwriting accuracy"),
+        "claude-3-7-sonnet-20250219": ("Medium", "~$0.004/card",  "Latest Claude, highest accuracy"),
+        "gpt-4o":                     ("Medium", "~$0.005/card",  "OpenAI alternative"),
+        "gpt-4o-mini":                ("Fast",   "~$0.0005/card", "OpenAI budget option"),
     }
     if model in model_info:
         speed, cost, note = model_info[model]
@@ -94,47 +119,59 @@ def render():
 
     st.divider()
 
-    # ── Save button ───────────────────────────────────────────────────────────
-    if st.button("Save Settings", type="primary", use_container_width=True):
-        st.session_state["api_key"] = api_key
-        st.session_state["base_url"] = base_url
+    # ── Save + Test (combined — one click, always reliable) ───────────────────
+    st.subheader("Save & Test Connection")
+    st.markdown(
+        "Click **Save & Test Connection** to save your settings and verify the API key "
+        "in a single step. Or click **Save Settings** alone if you do not want to test."
+    )
+
+    col_save, col_test = st.columns(2)
+
+    if col_save.button("Save Settings", use_container_width=True):
+        st.session_state["api_key"]  = api_key
+        st.session_state["base_url"] = base_url or default_url
         st.session_state["model"]    = model
-        st.success("Settings saved for this session.")
+        st.success("Settings saved.")
 
-    st.divider()
+    if col_test.button("Save & Test Connection", use_container_width=True, type="primary"):
+        # Commit current form values to session state BEFORE testing
+        st.session_state["api_key"]  = api_key
+        st.session_state["base_url"] = base_url or default_url
+        st.session_state["model"]    = model
 
-    # ── Connection test ───────────────────────────────────────────────────────
-    st.subheader("Test API Connection")
-    st.markdown("Send a simple test request to verify your API key and model are working.")
+        key_to_test   = st.session_state["api_key"]
+        url_to_test   = st.session_state["base_url"]
+        model_to_test = st.session_state["model"]
 
-    if st.button("Test Connection"):
-        if not api_key:
+        if not key_to_test:
             st.error("Please enter an API key first.")
         else:
-            from transcribe_engine import build_client
-            from openai import OpenAI
-            try:
-                client = build_client(api_key=api_key, base_url=base_url or None)
-                response = client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "user", "content": "Reply with the single word: connected"}],
-                    max_tokens=10,
-                )
-                reply = response.choices[0].message.content.strip().lower()
-                if "connect" in reply or len(reply) < 30:
-                    st.success(f"Connection successful! Model replied: *\"{reply}\"*")
-                else:
-                    st.warning(f"Connected, but unexpected reply: *\"{reply}\"*")
-            except Exception as e:
-                st.error(f"Connection failed: {e}")
+            with st.spinner(f"Testing connection to {model_to_test}…"):
+                try:
+                    client = build_client(api_key=key_to_test, base_url=url_to_test)
+                    response = client.chat.completions.create(
+                        model=model_to_test,
+                        messages=[{"role": "user", "content": "Reply with the single word: connected"}],
+                        max_tokens=10,
+                        temperature=0,
+                    )
+                    reply = response.choices[0].message.content.strip().lower()
+                    if "connect" in reply or len(reply) < 30:
+                        st.success(f"Connection successful! Model replied: *\"{reply}\"*")
+                    else:
+                        st.warning(f"Connected, but unexpected reply: *\"{reply}\"*")
+                except Exception as e:
+                    st.error(
+                        f"Connection failed: {e}\n\n"
+                        "Check that your API key is correct and the Base URL matches your provider."
+                    )
 
     st.divider()
 
     # ── Danger zone ───────────────────────────────────────────────────────────
-    with st.expander("⚠️ Danger Zone"):
-        st.warning(
-            "These actions are irreversible. Use with caution."
-        )
+    with st.expander("Danger Zone"):
+        st.warning("These actions are irreversible. Use with caution.")
         col1, col2 = st.columns(2)
         if col1.button("Clear All Transcriptions", use_container_width=True):
             from data_store import TRANSCRIPTIONS_DIR
