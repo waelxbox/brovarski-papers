@@ -3,6 +3,8 @@ transcribe_engine.py
 ====================
 Core AI transcription logic shared by the upload pipeline and the app.
 Sends a single image to the Gemini API and returns a structured JSON dict.
+
+Accepts either a file Path OR raw bytes as the image input.
 """
 
 import base64
@@ -58,8 +60,14 @@ Confidence_Notes: briefly flag any words you are uncertain about, e.g.
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-def _encode_image(image_path: Path) -> tuple:
-    """Return (base64_data, mime_type) for the given image file."""
+def _encode_image(image_input, filename: str = "card.jpg") -> tuple:
+    """
+    Return (base64_data, mime_type) for the given image.
+
+    Accepts:
+      - a Path object  (reads from disk, detects MIME from extension)
+      - raw bytes      (detects MIME by sniffing magic bytes; falls back to image/jpeg)
+    """
     mime_map = {
         ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
         ".png": "image/png",
@@ -67,10 +75,36 @@ def _encode_image(image_path: Path) -> tuple:
         ".bmp": "image/bmp",
         ".webp": "image/webp",
     }
-    mime = mime_map.get(image_path.suffix.lower(), "image/jpeg")
-    with open(image_path, "rb") as f:
-        data = base64.standard_b64encode(f.read()).decode("utf-8")
-    return data, mime
+
+    if isinstance(image_input, (str, Path)):
+        # File path mode
+        image_path = Path(image_input)
+        mime = mime_map.get(image_path.suffix.lower(), "image/jpeg")
+        with open(image_path, "rb") as f:
+            raw_bytes = f.read()
+        source_name = image_path.name
+    else:
+        # Raw bytes mode — sniff magic bytes to determine MIME type
+        raw_bytes = bytes(image_input)
+        if raw_bytes[:8] == b"\x89PNG\r\n\x1a\n":
+            mime = "image/png"
+        elif raw_bytes[:4] in (b"RIFF", b"WEBP"):
+            mime = "image/webp"
+        elif raw_bytes[:2] in (b"MM", b"II"):
+            mime = "image/tiff"
+        elif raw_bytes[:2] == b"BM":
+            mime = "image/bmp"
+        else:
+            # Default: JPEG (covers b'\xff\xd8\xff' and unknown formats)
+            mime = "image/jpeg"
+        # Try to get MIME from filename hint if available
+        ext = Path(filename).suffix.lower()
+        if ext in mime_map:
+            mime = mime_map[ext]
+        source_name = filename
+
+    data = base64.standard_b64encode(raw_bytes).decode("utf-8")
+    return data, mime, source_name
 
 
 def build_client(api_key: str | None = None, base_url: str | None = None) -> OpenAI:
@@ -89,15 +123,21 @@ def build_client(api_key: str | None = None, base_url: str | None = None) -> Ope
 # ── Main transcription function ───────────────────────────────────────────────
 
 def transcribe_image(
-    image_path: Path,
+    image_input,
     client: OpenAI,
     model: str = DEFAULT_MODEL,
+    filename: str = "card.jpg",
 ) -> dict:
     """
     Send one image to the Gemini API and return the parsed JSON dict.
+
+    image_input: Path/str to an image file, OR raw bytes.
+    filename:    Hint for the source filename when passing raw bytes
+                 (used in metadata and MIME detection).
+
     Always returns a dict; on failure it contains an 'error' key.
     """
-    b64, mime = _encode_image(image_path)
+    b64, mime, source_name = _encode_image(image_input, filename=filename)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -145,7 +185,7 @@ def transcribe_image(
                 "[HIEROGLYPHS_PRESENT]" in result.get("Full_Transcription", "")
             )
 
-        result["_source_image"] = image_path.name
+        result["_source_image"] = source_name
         result["_model"] = model
         result["_review_status"] = "pending"
         return result
@@ -154,14 +194,14 @@ def transcribe_image(
         return {
             "error": f"JSON parse error: {exc}",
             "raw_response": raw,
-            "_source_image": image_path.name,
+            "_source_image": source_name,
             "_model": model,
             "_review_status": "error",
         }
     except Exception as exc:
         return {
             "error": str(exc),
-            "_source_image": image_path.name,
+            "_source_image": source_name,
             "_model": model,
             "_review_status": "error",
         }

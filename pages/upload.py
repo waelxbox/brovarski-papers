@@ -53,7 +53,7 @@ def render():
 
                 status_area.info(f"Transcribing **{card['name']}** ({i+1}/{total})…")
                 image_bytes = get_image_bytes(card)
-                result = transcribe_image(image_bytes, client, model=model)
+                result = transcribe_image(image_bytes, client, model=model, filename=card["name"])
                 save_json(card["stem"], result)
 
                 if "error" in result: log_lines.append(f"❌ Error on **{card['name']}**: {result['error']}")
@@ -82,7 +82,7 @@ def render():
                     with st.spinner(f"Re-transcribing {len(error_cards)} error card(s)…"):
                         for c in error_cards:
                             image_bytes = get_image_bytes(c)
-                            result = transcribe_image(image_bytes, client, model=model)
+                            result = transcribe_image(image_bytes, client, model=model, filename=card["name"])
                             save_json(c["stem"], result)
                     st.success("Done. Refresh to see updated statuses."); st.rerun()
                 else: st.info("No error cards to retry.")
@@ -102,7 +102,7 @@ def render():
             card = next(c for c in cards if c["name"] == selected)
             with st.spinner(f"Transcribing {selected}…"):
                 image_bytes = get_image_bytes(card)
-                result = transcribe_image(image_bytes, client, model=model)
+                result = transcribe_image(image_bytes, client, model=model, filename=card["name"])
                 save_json(card["stem"], result)
             if "error" in result: st.error(f"Transcription failed: {result['error']}")
             else: st.success(f"Done! **{selected}** has been transcribed and is ready for review."); st.rerun()
