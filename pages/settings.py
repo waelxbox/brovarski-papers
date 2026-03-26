@@ -156,11 +156,17 @@ def render():
                         max_tokens=10,
                         temperature=0,
                     )
-                    reply = response.choices[0].message.content.strip().lower()
-                    if "connect" in reply or len(reply) < 30:
-                        st.success(f"Connection successful! Model replied: *\"{reply}\"*")
+                    content = response.choices[0].message.content
+                    if content is None:
+                        # Gemini sometimes returns None on the test ping — the
+                        # connection itself succeeded if we got a 200 response.
+                        st.success("Connection successful! (Model returned an empty ping response — this is normal for Gemini.)")
                     else:
-                        st.warning(f"Connected, but unexpected reply: *\"{reply}\"*")
+                        reply = content.strip().lower()
+                        if "connect" in reply or len(reply) < 50:
+                            st.success(f"Connection successful! Model replied: *\"{reply}\"*")
+                        else:
+                            st.warning(f"Connected, but unexpected reply: *\"{reply}\"*")
                 except Exception as e:
                     st.error(
                         f"Connection failed: {e}\n\n"
