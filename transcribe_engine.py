@@ -176,6 +176,43 @@ OUTPUT SCHEMA (strict JSON)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
+def _recover_truncated_json(raw: str) -> dict | None:
+    """
+    Attempt to salvage a truncated JSON response from the model.
+    Closes any open strings, arrays, and objects, then re-parses.
+    Returns a dict on success, or None if recovery fails.
+    """
+    s = raw.rstrip()
+    # Count open braces/brackets to determine what needs closing
+    depth_brace = s.count('{') - s.count('}')
+    depth_bracket = s.count('[') - s.count(']')
+    # If we're inside an unterminated string, close it
+    # Heuristic: odd number of unescaped quotes means an open string
+    in_string = False
+    i = 0
+    while i < len(s):
+        if s[i] == '"' and (i == 0 or s[i-1] != '\\'):
+            in_string = not in_string
+        i += 1
+    if in_string:
+        s += '"'  # close the open string
+    # Close open arrays and objects
+    s += ']' * max(0, depth_bracket)
+    s += '}' * max(0, depth_brace)
+    try:
+        result = json.loads(s)
+        # Mark that this was recovered so the reviewer knows to check it
+        if isinstance(result, dict):
+            existing_note = result.get('Confidence_Notes') or ''
+            result['Confidence_Notes'] = (
+                '[TRUNCATED RESPONSE — review Full_Transcription for completeness] '
+                + existing_note
+            ).strip()
+            result['_review_status'] = 'error'
+        return result
+    except Exception:
+        return None
+
 def _mime_from_filename(filename: str) -> str:
     """Return MIME type based on file extension, defaulting to image/jpeg."""
     ext = Path(filename).suffix.lower()
@@ -281,7 +318,7 @@ def transcribe_image(
             model=model,
             messages=messages,
             temperature=0.1,
-            max_tokens=4096,
+            max_tokens=8192,
             response_format={"type": "json_object"},
         )
 
@@ -301,7 +338,13 @@ def transcribe_image(
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
 
-        result = json.loads(raw)
+        # Attempt to parse; if truncated, try to recover by closing open structures
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            result = _recover_truncated_json(raw)
+            if result is None:
+                raise
 
         # Normalise the hieroglyph flag
         if "Hieroglyphs_Present" not in result:
