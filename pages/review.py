@@ -85,7 +85,11 @@ def render():
         edited["Subject_Heading"] = st.text_input("Subject Heading", value=data.get("Subject_Heading") or "", help="The main topic or person's name on the card header.")
         for field in ("Museum_References", "Object_Types", "Egyptian_Titles"):
             edited[field] = str_to_list(st.text_area(field.replace("_", " "), value=list_to_str(data.get(field)), height=90, help="One entry per line."))
-        edited["Full_Transcription"] = st.text_area("Full Transcription", value=data.get("Full_Transcription") or "", height=240, help="Complete verbatim text of the card. Keep [HIEROGLYPHS_PRESENT] tags where hieroglyphs appear.")
+        _ft_value = data.get("Full_Transcription") or ""
+        # Auto-size: 28px per line, minimum 300px, maximum 800px
+        _ft_lines = max(_ft_value.count("\n") + 1, 1)
+        _ft_height = max(300, min(800, _ft_lines * 28 + 40))
+        edited["Full_Transcription"] = st.text_area("Full Transcription", value=_ft_value, height=_ft_height, help="Complete verbatim text of the card. Keep [HIEROGLYPHS_PRESENT] tags where hieroglyphs appear.")
         edited["Confidence_Notes"] = st.text_area("Confidence Notes", value=data.get("Confidence_Notes") or "", height=70, help="Note any uncertain readings here.")
         edited["Hieroglyphs_Present"] = st.checkbox("Hieroglyphs present on this card", value=bool(data.get("Hieroglyphs_Present", False)))
 
