@@ -90,19 +90,25 @@ with st.sidebar:
 
     st.divider()
 
-    from data_store import count_by_status
-    counts = count_by_status()
-    total = counts["total"]
-    done = counts["reviewed"] + counts["flagged"]
-    st.caption(f"**{done}** / **{total}** cards reviewed")
-    if total > 0:
-        st.progress(done / total)
+    try:
+        from data_store import count_by_status
+        counts = count_by_status()
+        total = counts["total"]
+        done = counts["reviewed"] + counts["flagged"]
+        st.caption(f"**{done}** / **{total}** cards reviewed")
+        if total > 0:
+            st.progress(done / total)
+    except Exception:
+        st.caption("Loading…")
 
     st.divider()
 
     # Google Drive status indicator
-    if st.session_state.get("gdrive_creds"):
+    from gdrive_store import _get_cache_keys
+    if _get_cache_keys() is not None:
         st.success("Google Drive connected")
+    elif st.session_state.get("gdrive_creds"):
+        st.success("Google Drive connected (session)")
     else:
         st.info("Storage: Local (temporary)")
         if st.button("Connect Google Drive", use_container_width=True):

@@ -66,7 +66,10 @@ def _get_backend():
 # --- Unified I/O ---
 
 def list_cards() -> list[dict]:
-    backend = _get_backend()
+    try:
+        backend = _get_backend()
+    except Exception:
+        backend = None
     cards = []
     if backend:
         image_files = backend.list_files(backend.uploads_id)
