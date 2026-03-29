@@ -15,7 +15,7 @@ from google_auth_oauthlib.flow import Flow
 from gdrive_store import load_credentials_from_secrets, GDriveStore
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
-REDIRECT_URI = "urn:ietf:wg:oauth:2.0:oob"  # "copy the code" flow — works without a redirect server
+REDIRECT_URI = "http://localhost"  # Must match the redirect_uri registered in Google Cloud Console
 
 
 def _check_secrets_connection() -> bool:
@@ -144,32 +144,47 @@ Google Drive will be permanently connected — no login required ever again.
             st.divider()
             st.markdown("### Step 3 — Authorize Access")
             st.markdown(
-                "Click the link below. Sign in with your Google account, grant permission, "
-                "then copy the **authorization code** Google gives you."
+                "Click the link below. Sign in with your Google account and grant permission. "
+                "Google will then redirect you to a **localhost** page that won't load — that's normal. "
+                "Copy the full URL from your browser's address bar and paste it below."
             )
             st.markdown(f"**[→ Click here to authorize Google Drive access]({auth_url})**")
+            st.info(
+                "After granting access, your browser will show an error page like "
+                "*'This site can't be reached'* or *'localhost refused to connect'*. "
+                "That is expected. Just copy the entire URL from the address bar."
+            )
             st.divider()
 
-            st.markdown("### Step 4 — Paste the Authorization Code")
-            auth_code = st.text_input("Paste the authorization code here", key="auth_code_input")
+            st.markdown("### Step 4 — Paste the Redirect URL")
+            st.caption("Paste the full URL from your browser address bar (it starts with `http://localhost/?code=...`)")
+            redirect_url = st.text_input("Paste the full redirect URL here", key="auth_code_input")
 
-            if st.button("Connect Google Drive", type="primary", disabled=not auth_code):
+            if st.button("Connect Google Drive", type="primary", disabled=not redirect_url):
                 with st.spinner("Exchanging code for tokens…"):
                     try:
-                        flow.fetch_token(code=auth_code.strip())
-                        creds = flow.credentials
-                        creds_dict = {
-                            "token":         creds.token,
-                            "refresh_token": creds.refresh_token,
-                            "token_uri":     creds.token_uri,
-                            "client_id":     creds.client_id,
-                            "client_secret": creds.client_secret,
-                        }
-                        st.session_state["gdrive_creds"] = json.dumps(creds_dict)
-                        st.success("✅ Connected! Scroll up to see your Secrets snippet.")
-                        st.rerun()
+                        # Extract the auth code from the redirect URL
+                        from urllib.parse import urlparse, parse_qs
+                        parsed = urlparse(redirect_url.strip())
+                        params = parse_qs(parsed.query)
+                        auth_code = params.get("code", [None])[0]
+                        if not auth_code:
+                            st.error("Could not find an authorization code in that URL. Make sure you copied the full address bar URL.")
+                        else:
+                            flow.fetch_token(code=auth_code)
+                            creds = flow.credentials
+                            creds_dict = {
+                                "token":         creds.token,
+                                "refresh_token": creds.refresh_token,
+                                "token_uri":     creds.token_uri,
+                                "client_id":     creds.client_id,
+                                "client_secret": creds.client_secret,
+                            }
+                            st.session_state["gdrive_creds"] = json.dumps(creds_dict)
+                            st.success("✅ Connected! Scroll up to see your Secrets snippet.")
+                            st.rerun()
                     except Exception as e:
                         st.error(f"Failed to exchange code: {e}")
-                        st.info("Make sure you copied the full code and that it hasn't expired (codes expire in ~10 minutes).")
+                        st.info("Make sure you copied the full URL from the address bar and try again. Codes expire in ~10 minutes.")
         except Exception as e:
             st.error(f"Could not build OAuth flow: {e}")
