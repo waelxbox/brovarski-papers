@@ -36,14 +36,30 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 # --- Backend helper ---
 
 def _get_backend():
-    """Return a GDriveStore if credentials are available, else None (local mode)."""
-    creds = st.session_state.get("gdrive_creds")
-    if creds:
+    """
+    Return a GDriveStore if credentials are available, else None (local mode).
+    Priority:
+      1. Streamlit Secrets [gdrive] section (permanent, survives restarts)
+      2. Session-state gdrive_creds (set during first-time OAuth flow)
+    """
+    from gdrive_store import load_credentials_from_secrets, GDriveStore
+
+    # Try Secrets first (permanent connection)
+    try:
+        creds = load_credentials_from_secrets()
+        if creds is not None:
+            return GDriveStore()
+    except Exception:
+        pass
+
+    # Fall back to session-state credentials (first-time auth, not yet in Secrets)
+    session_creds = st.session_state.get("gdrive_creds")
+    if session_creds:
         try:
-            from gdrive_store import GDriveStore
-            return GDriveStore(creds)
+            return GDriveStore(creds_json=session_creds)
         except Exception:
             return None
+
     return None
 
 
@@ -153,18 +169,7 @@ def save_json(card_stem: str, data: dict):
     filename = f"{card_stem}.json"
     content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
     if backend:
-        from googleapiclient.http import MediaIoBaseUpload
-        # Delete existing file first to avoid duplicates
-        json_files = {f["name"]: f for f in backend.list_files(backend.transcriptions_id)}
-        existing = json_files.get(filename)
-        if existing:
-            try:
-                backend.service.files().delete(fileId=existing["id"]).execute()
-            except Exception:
-                pass
-        media = MediaIoBaseUpload(io.BytesIO(content), mimetype="application/json")
-        file_metadata = {"name": filename, "parents": [backend.transcriptions_id]}
-        backend.service.files().create(body=file_metadata, media_body=media).execute()
+        backend.upsert_json(filename, data, backend.transcriptions_id)
     else:
         (TRANSCRIPTIONS_DIR / filename).write_bytes(content)
 
@@ -184,11 +189,11 @@ def get_image_bytes(card: dict) -> bytes:
 def save_uploaded_file(uploaded_file):
     backend = _get_backend()
     if backend:
-        from googleapiclient.http import MediaIoBaseUpload
-        content = uploaded_file.getbuffer()
-        media = MediaIoBaseUpload(io.BytesIO(content), mimetype="application/octet-stream")
-        file_metadata = {"name": uploaded_file.name, "parents": [backend.uploads_id]}
-        backend.service.files().create(body=file_metadata, media_body=media).execute()
+        backend.upload_bytes(
+            uploaded_file.name,
+            bytes(uploaded_file.getbuffer()),
+            backend.uploads_id,
+        )
     else:
         (UPLOADS_DIR / uploaded_file.name).write_bytes(uploaded_file.getbuffer())
 
