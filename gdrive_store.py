@@ -2,15 +2,16 @@
 # =================
 # Google Drive storage backend.
 # Uses OAuth 2.0 credentials (client_id, client_secret, refresh_token) stored
-# in Streamlit Secrets. The access token is refreshed automatically — no user
-# interaction needed after the initial one-time setup.
+# in Streamlit Secrets.
 #
-# PERFORMANCE: The Drive service, folder IDs, and file listings are all cached
-# aggressively so that page reloads never trigger redundant API calls.
+# IMPORTANT: We deliberately avoid @st.cache_resource for the Drive service
+# object because caching C-extension objects causes "double free or corruption"
+# crashes on Streamlit Cloud (known issue). Instead we use a plain module-level
+# singleton that is safe across reruns.
 
 import io
 import json
-from pathlib import Path
+import time
 
 import streamlit as st
 from google.oauth2.credentials import Credentials
@@ -24,10 +25,28 @@ APP_FOLDER_NAME = "Brovarski_Papers_App"
 UPLOADS_FOLDER_NAME = "uploads"
 TRANSCRIPTIONS_FOLDER_NAME = "transcriptions"
 
+# Module-level singleton — rebuilt at most once per process restart
+_singleton: "GDriveStore | None" = None
+_singleton_key: str | None = None   # refresh_token used to build it
+
 
 # ---------------------------------------------------------------------------
 # Credential helpers
 # ---------------------------------------------------------------------------
+
+def _get_cache_keys() -> tuple[str, str, str] | None:
+    """Return (refresh_token, client_id, client_secret) from Secrets, or None."""
+    try:
+        section = st.secrets.get("gdrive", {})
+        rt = section.get("refresh_token", "")
+        ci = section.get("client_id", "")
+        cs = section.get("client_secret", "")
+        if rt and ci and cs:
+            return rt, ci, cs
+    except Exception:
+        pass
+    return None
+
 
 def _build_credentials(creds_dict: dict) -> Credentials:
     return Credentials(
@@ -41,24 +60,20 @@ def _build_credentials(creds_dict: dict) -> Credentials:
 
 
 def load_credentials_from_secrets() -> Credentials | None:
-    """
-    Load OAuth credentials from Streamlit Secrets [gdrive] section.
-    Returns a valid, refreshed Credentials object or None.
-    """
+    """Load and refresh credentials from Streamlit Secrets."""
     try:
-        section = st.secrets.get("gdrive", {})
-        if not section:
+        keys = _get_cache_keys()
+        if keys is None:
             return None
-        creds_dict = {
-            "client_id":     section.get("client_id", ""),
-            "client_secret": section.get("client_secret", ""),
-            "refresh_token": section.get("refresh_token", ""),
-            "token_uri":     section.get("token_uri", "https://oauth2.googleapis.com/token"),
-            "token":         section.get("token", None),
-        }
-        if not creds_dict["client_id"] or not creds_dict["refresh_token"]:
-            return None
-        creds = _build_credentials(creds_dict)
+        rt, ci, cs = keys
+        creds = Credentials(
+            token=None,
+            refresh_token=rt,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=ci,
+            client_secret=cs,
+            scopes=SCOPES,
+        )
         if not creds.valid:
             creds.refresh(Request())
         return creds
@@ -78,82 +93,27 @@ def load_credentials_from_json(creds_json: str) -> Credentials | None:
 
 
 # ---------------------------------------------------------------------------
-# Cached Drive service + folder IDs
-# Keyed on refresh_token so different accounts get separate caches.
-# TTL=3600 means the service is rebuilt at most once per hour.
+# Module-level singleton (no st.cache_resource to avoid double-free crash)
 # ---------------------------------------------------------------------------
 
-@st.cache_resource(ttl=3600)
-def _cached_service(refresh_token: str, client_id: str, client_secret: str):
-    """Build and cache a Drive service. Rebuilt at most once per hour."""
-    creds = Credentials(
-        token=None,
-        refresh_token=refresh_token,
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=client_id,
-        client_secret=client_secret,
-        scopes=SCOPES,
-    )
-    creds.refresh(Request())
-    return build("drive", "v3", credentials=creds)
-
-
-@st.cache_data(ttl=3600)
-def _cached_folder_ids(refresh_token: str, client_id: str, client_secret: str) -> dict:
-    """Find or create app folders. Cached for 1 hour — only 3 API calls max per hour."""
-    svc = _cached_service(refresh_token, client_id, client_secret)
-
-    def find_or_create(name, parent_id=None):
-        q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
-        if parent_id:
-            q += f" and '{parent_id}' in parents"
-        items = svc.files().list(q=q, spaces="drive", fields="files(id)").execute().get("files", [])
-        if items:
-            return items[0]["id"]
-        meta = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
-        if parent_id:
-            meta["parents"] = [parent_id]
-        return svc.files().create(body=meta, fields="id").execute()["id"]
-
-    app_id     = find_or_create(APP_FOLDER_NAME)
-    uploads_id = find_or_create(UPLOADS_FOLDER_NAME, app_id)
-    trans_id   = find_or_create(TRANSCRIPTIONS_FOLDER_NAME, app_id)
-    return {"app": app_id, "uploads": uploads_id, "transcriptions": trans_id}
-
-
-@st.cache_data(ttl=60)
-def _cached_file_list(folder_id: str, refresh_token: str, client_id: str, client_secret: str) -> list[dict]:
-    """List files in a folder. Cached for 60 seconds to avoid hammering the API."""
-    svc = _cached_service(refresh_token, client_id, client_secret)
-    results = []
-    page_token = None
-    while True:
-        resp = svc.files().list(
-            q=f"'{folder_id}' in parents and trashed=false",
-            spaces="drive",
-            fields="nextPageToken, files(id, name)",
-            pageToken=page_token,
-            pageSize=1000,
-        ).execute()
-        results.extend(resp.get("files", []))
-        page_token = resp.get("nextPageToken")
-        if not page_token:
-            break
-    return results
-
-
-def _get_cache_keys() -> tuple[str, str, str] | None:
-    """Return (refresh_token, client_id, client_secret) from Secrets, or None."""
-    try:
-        section = st.secrets.get("gdrive", {})
-        rt = section.get("refresh_token", "")
-        ci = section.get("client_id", "")
-        cs = section.get("client_secret", "")
-        if rt and ci and cs:
-            return rt, ci, cs
-    except Exception:
-        pass
-    return None
+def get_store() -> "GDriveStore | None":
+    """
+    Return the module-level GDriveStore singleton.
+    Builds it once per process; returns None if credentials are unavailable.
+    """
+    global _singleton, _singleton_key
+    keys = _get_cache_keys()
+    if keys is None:
+        return None
+    rt = keys[0]
+    # Rebuild only if the refresh token changed (i.e. different account)
+    if _singleton is None or _singleton_key != rt:
+        try:
+            _singleton = GDriveStore()
+            _singleton_key = rt
+        except Exception:
+            _singleton = None
+    return _singleton
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +122,7 @@ def _get_cache_keys() -> tuple[str, str, str] | None:
 
 class GDriveStore:
     """
-    Thin wrapper around the Drive v3 API with aggressive caching.
+    Thin wrapper around the Drive v3 API.
     Instantiate with either:
       - GDriveStore()               → loads credentials from Streamlit Secrets
       - GDriveStore(creds_json=...) → loads from a JSON string (first-time auth)
@@ -170,38 +130,71 @@ class GDriveStore:
 
     def __init__(self, creds_json: str | None = None):
         if creds_json:
-            # First-time auth: build service directly (no cache key available yet)
             creds = load_credentials_from_json(creds_json)
             if creds is None:
                 raise RuntimeError("Invalid credentials JSON.")
-            self._service = build("drive", "v3", credentials=creds)
-            self._rt  = creds.refresh_token
-            self._ci  = creds.client_id
-            self._cs  = creds.client_secret
-            folder_ids = _cached_folder_ids(self._rt, self._ci, self._cs)
         else:
-            keys = _get_cache_keys()
-            if keys is None:
+            creds = load_credentials_from_secrets()
+            if creds is None:
                 raise RuntimeError("Google Drive credentials not found in Streamlit Secrets.")
-            self._rt, self._ci, self._cs = keys
-            self._service = _cached_service(self._rt, self._ci, self._cs)
-            folder_ids = _cached_folder_ids(self._rt, self._ci, self._cs)
 
-        self.uploads_id       = folder_ids["uploads"]
+        self._service = build("drive", "v3", credentials=creds)
+        folder_ids = self._get_folder_ids()
+        self.uploads_id        = folder_ids["uploads"]
         self.transcriptions_id = folder_ids["transcriptions"]
 
-    @property
-    def service(self):
-        return self._service
+        # In-process file list cache: {folder_id: (timestamp, [files])}
+        self._list_cache: dict[str, tuple[float, list]] = {}
+        self._list_ttl = 60  # seconds
 
-    # ── File listing (cached 60s) ────────────────────────────────────────────
+    def _get_folder_ids(self) -> dict:
+        def find_or_create(name, parent_id=None):
+            q = f"name='{name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+            if parent_id:
+                q += f" and '{parent_id}' in parents"
+            items = self._service.files().list(
+                q=q, spaces="drive", fields="files(id)"
+            ).execute().get("files", [])
+            if items:
+                return items[0]["id"]
+            meta = {"name": name, "mimeType": "application/vnd.google-apps.folder"}
+            if parent_id:
+                meta["parents"] = [parent_id]
+            return self._service.files().create(body=meta, fields="id").execute()["id"]
+
+        app_id     = find_or_create(APP_FOLDER_NAME)
+        uploads_id = find_or_create(UPLOADS_FOLDER_NAME, app_id)
+        trans_id   = find_or_create(TRANSCRIPTIONS_FOLDER_NAME, app_id)
+        return {"app": app_id, "uploads": uploads_id, "transcriptions": trans_id}
+
+    # ── File listing (in-process TTL cache) ─────────────────────────────────
 
     def list_files(self, folder_id: str) -> list[dict]:
-        return _cached_file_list(folder_id, self._rt, self._ci, self._cs)
+        now = time.time()
+        cached = self._list_cache.get(folder_id)
+        if cached and (now - cached[0]) < self._list_ttl:
+            return cached[1]
+
+        results = []
+        page_token = None
+        while True:
+            resp = self._service.files().list(
+                q=f"'{folder_id}' in parents and trashed=false",
+                spaces="drive",
+                fields="nextPageToken, files(id, name)",
+                pageToken=page_token,
+                pageSize=1000,
+            ).execute()
+            results.extend(resp.get("files", []))
+            page_token = resp.get("nextPageToken")
+            if not page_token:
+                break
+
+        self._list_cache[folder_id] = (now, results)
+        return results
 
     def invalidate_list_cache(self):
-        """Call after uploading a file so the next list_files() is fresh."""
-        _cached_file_list.clear()
+        self._list_cache.clear()
 
     # ── File download ────────────────────────────────────────────────────────
 
@@ -220,7 +213,9 @@ class GDriveStore:
                      mimetype: str = "application/octet-stream") -> str:
         media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype)
         meta  = {"name": name, "parents": [folder_id]}
-        f = self._service.files().create(body=meta, media_body=media, fields="id").execute()
+        f = self._service.files().create(
+            body=meta, media_body=media, fields="id"
+        ).execute()
         self.invalidate_list_cache()
         return f["id"]
 
