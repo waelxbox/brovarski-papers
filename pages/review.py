@@ -72,10 +72,18 @@ def render():
 
     with left_col:
         st.subheader("Original Scan")
-        try:
-            st.image(get_image_bytes(card), use_container_width=True)
-        except Exception as e:
-            st.error(f"Cannot display image: {e}")
+        img_bytes = get_image_bytes(card)
+        if img_bytes:
+            try:
+                st.image(img_bytes, use_container_width=True)
+            except Exception as e:
+                st.error(f"Cannot display image: {e}")
+        else:
+            st.info(
+                "📂 Image not yet uploaded for this card.\n\n"
+                "The transcription JSON was imported but the scan image is missing. "
+                "Go to **Upload & Transcribe → Import Batch Results → Step B** to upload the image."
+            )
         with st.expander("Raw JSON (read-only)"):
             st.json(data)
 

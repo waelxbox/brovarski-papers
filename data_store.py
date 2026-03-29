@@ -77,10 +77,15 @@ def list_cards() -> list[dict]:
                 "has_hieroglyphs": bool(data.get("Hieroglyphs_Present", False)),
             })
     else:
+        seen_stems = set()
+
+        # First pass: cards that have an image file (with or without JSON)
         for img_path in sorted(UPLOADS_DIR.iterdir()):
             if not img_path.is_file() or img_path.suffix.lower() not in IMAGE_EXTENSIONS:
                 continue
-            json_path = TRANSCRIPTIONS_DIR / (img_path.stem + ".json")
+            stem = img_path.stem
+            seen_stems.add(stem)
+            json_path = TRANSCRIPTIONS_DIR / (stem + ".json")
             data = {}
             if json_path.exists():
                 try:
@@ -91,12 +96,43 @@ def list_cards() -> list[dict]:
                 "image_path": img_path,
                 "json_path": json_path,
                 "name": img_path.name,
-                "stem": img_path.stem,
+                "stem": stem,
                 "status": data.get("_review_status", STATUS_PENDING) if data else "not_transcribed",
                 "has_json": json_path.exists(),
                 "has_error": "error" in data,
                 "has_hieroglyphs": bool(data.get("Hieroglyphs_Present", False)),
             })
+
+        # Second pass: JSON-only cards (batch-imported transcriptions without a matching image yet)
+        for json_path in sorted(TRANSCRIPTIONS_DIR.iterdir()):
+            if not json_path.is_file() or json_path.suffix.lower() != ".json":
+                continue
+            stem = json_path.stem
+            if stem in seen_stems:
+                continue  # already covered above
+            data = {}
+            try:
+                data = json.loads(json_path.read_text(encoding="utf-8"))
+            except Exception:
+                data = {}
+            # Try to find a matching image with any supported extension
+            img_path = None
+            for ext in IMAGE_EXTENSIONS:
+                candidate = UPLOADS_DIR / (stem + ext)
+                if candidate.exists():
+                    img_path = candidate
+                    break
+            cards.append({
+                "image_path": img_path,  # may be None if image not yet uploaded
+                "json_path": json_path,
+                "name": stem + (img_path.suffix if img_path else ".json"),
+                "stem": stem,
+                "status": data.get("_review_status", STATUS_PENDING) if data else STATUS_PENDING,
+                "has_json": True,
+                "has_error": "error" in data,
+                "has_hieroglyphs": bool(data.get("Hieroglyphs_Present", False)),
+            })
+
     return sorted(cards, key=lambda c: c["name"])
 
 
