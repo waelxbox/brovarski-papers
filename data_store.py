@@ -45,25 +45,19 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 def _get_backend():
     """
-    Return a GDriveStore if credentials are available, else None (local mode).
-    Uses a module-level singleton to avoid rebuilding the Drive service on every
-    page render (which caused double-free crashes on Streamlit Cloud).
+    Return a GDriveStore if credentials are available in session state, else None.
+    Credentials are stored in st.session_state["oauth_gdrive_creds"] after the
+    user completes the OAuth flow on the Google Drive page.
     """
-    from gdrive_store import get_store, _get_cache_keys, GDriveStore
+    from gdrive_store import GDriveStore
 
-    # Try module-level singleton from Secrets first (permanent connection)
-    if _get_cache_keys() is not None:
-        return get_store()
-
-    # Fall back to session-state credentials (first-time auth, not yet in Secrets)
-    session_creds = st.session_state.get("gdrive_creds")
-    if session_creds:
-        try:
-            return GDriveStore(creds_json=session_creds)
-        except Exception:
-            return None
-
-    return None
+    creds = st.session_state.get("oauth_gdrive_creds")
+    if not creds:
+        return None
+    try:
+        return GDriveStore(credentials_info=creds)
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------

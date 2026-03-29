@@ -104,11 +104,8 @@ with st.sidebar:
     st.divider()
 
     # Google Drive status indicator
-    from gdrive_store import _get_cache_keys
-    if _get_cache_keys() is not None:
+    if st.session_state.get("oauth_gdrive_creds"):
         st.success("Google Drive connected")
-    elif st.session_state.get("gdrive_creds"):
-        st.success("Google Drive connected (session)")
     else:
         st.info("Storage: Local (temporary)")
         if st.button("Connect Google Drive", use_container_width=True):
