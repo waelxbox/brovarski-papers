@@ -1,6 +1,11 @@
 # data_store.py
 # =============
 # Centralised helpers for reading/writing data. Abstracts local vs Google Drive storage.
+#
+# PERFORMANCE NOTE (Google Drive mode):
+# Instead of downloading every JSON file on each page load to read status/metadata,
+# we maintain a single lightweight "index.json" file in the transcriptions folder.
+# This means the dashboard and sidebar only need ONE API call to get all card statuses.
 
 import csv
 import json
@@ -26,14 +31,17 @@ EDITABLE_FIELDS = [
     "Egyptian_Titles", "Full_Transcription", "Confidence_Notes"
 ]
 CSV_FIELDNAMES = ["image", "reviewed_at", "status"] + EDITABLE_FIELDS + ["Hieroglyphs_Present"]
+INDEX_FILENAME = "_index.json"  # Lightweight metadata index stored in transcriptions folder
 
-# Ensure local dirs exist (used as fallback and for CSV export)
+# Ensure local dirs exist
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
 TRANSCRIPTIONS_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# --- Backend helper ---
+# ---------------------------------------------------------------------------
+# Backend helper
+# ---------------------------------------------------------------------------
 
 def _get_backend():
     """
@@ -42,17 +50,16 @@ def _get_backend():
       1. Streamlit Secrets [gdrive] section (permanent, survives restarts)
       2. Session-state gdrive_creds (set during first-time OAuth flow)
     """
-    from gdrive_store import load_credentials_from_secrets, GDriveStore
+    from gdrive_store import _get_cache_keys, GDriveStore
 
     # Try Secrets first (permanent connection)
-    try:
-        creds = load_credentials_from_secrets()
-        if creds is not None:
+    if _get_cache_keys() is not None:
+        try:
             return GDriveStore()
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    # Fall back to session-state credentials (first-time auth, not yet in Secrets)
+    # Fall back to session-state credentials
     session_creds = st.session_state.get("gdrive_creds")
     if session_creds:
         try:
@@ -63,42 +70,104 @@ def _get_backend():
     return None
 
 
-# --- Unified I/O ---
+# ---------------------------------------------------------------------------
+# Drive index helpers — one small JSON file tracks all card metadata
+# ---------------------------------------------------------------------------
+
+def _load_drive_index(backend) -> dict:
+    """
+    Load the lightweight index from Drive. Returns dict keyed by stem.
+    Each entry: {status, has_json, has_error, has_hieroglyphs, json_id, image_id}
+    Falls back to empty dict if not found.
+    """
+    try:
+        files = backend.list_files(backend.transcriptions_id)
+        idx_file = next((f for f in files if f["name"] == INDEX_FILENAME), None)
+        if idx_file:
+            raw = backend.get_file_content(idx_file["id"])
+            return json.loads(raw)
+    except Exception:
+        pass
+    return {}
+
+
+def _save_drive_index(backend, index: dict):
+    """Save the lightweight index to Drive."""
+    try:
+        backend.upsert_json(INDEX_FILENAME, index, backend.transcriptions_id)
+    except Exception:
+        pass
+
+
+def _rebuild_drive_index(backend) -> dict:
+    """
+    Rebuild the index by listing files only (no content downloads).
+    Called once when index is missing or after bulk imports.
+    """
+    image_files = backend.list_files(backend.uploads_id)
+    json_files_list = backend.list_files(backend.transcriptions_id)
+
+    image_map = {Path(f["name"]).stem: f for f in image_files
+                 if Path(f["name"]).suffix.lower() in IMAGE_EXTENSIONS}
+    json_map  = {Path(f["name"]).stem: f for f in json_files_list
+                 if f["name"] != INDEX_FILENAME and Path(f["name"]).suffix.lower() == ".json"}
+
+    all_stems = set(image_map.keys()) | set(json_map.keys())
+    index = {}
+    for stem in all_stems:
+        img  = image_map.get(stem)
+        jf   = json_map.get(stem)
+        # We don't download the JSON here — status defaults to pending
+        # It will be updated to the real status next time save_json() is called
+        index[stem] = {
+            "image_id":       img["id"] if img else None,
+            "image_name":     img["name"] if img else (stem + ".jpg"),
+            "json_id":        jf["id"] if jf else None,
+            "has_json":       jf is not None,
+            "has_error":      False,
+            "has_hieroglyphs": False,
+            "status":         STATUS_PENDING if jf else "not_transcribed",
+        }
+    _save_drive_index(backend, index)
+    return index
+
+
+# ---------------------------------------------------------------------------
+# Unified I/O
+# ---------------------------------------------------------------------------
 
 def list_cards() -> list[dict]:
     try:
         backend = _get_backend()
     except Exception:
         backend = None
+
     cards = []
+
     if backend:
-        image_files = backend.list_files(backend.uploads_id)
-        json_files = {f["name"]: f for f in backend.list_files(backend.transcriptions_id)}
-        for img in image_files:
-            if Path(img["name"]).suffix.lower() not in IMAGE_EXTENSIONS:
-                continue
-            stem = Path(img["name"]).stem
-            json_file = json_files.get(f"{stem}.json")
-            data = {}
-            if json_file:
-                try:
-                    data = json.loads(backend.get_file_content(json_file["id"]))
-                except Exception:
-                    data = {}
+        # Load the lightweight index (1 API call max, cached 60s)
+        index = _load_drive_index(backend)
+
+        # If index is empty, rebuild it from file listings (no content downloads)
+        if not index:
+            index = _rebuild_drive_index(backend)
+
+        for stem, meta in index.items():
             cards.append({
-                "image_id": img["id"],
-                "json_id": json_file["id"] if json_file else None,
-                "name": img["name"],
-                "stem": stem,
-                "status": data.get("_review_status", STATUS_PENDING) if data else "not_transcribed",
-                "has_json": bool(json_file),
-                "has_error": "error" in data,
-                "has_hieroglyphs": bool(data.get("Hieroglyphs_Present", False)),
+                "image_id":  meta.get("image_id"),
+                "json_id":   meta.get("json_id"),
+                "name":      meta.get("image_name", stem + ".jpg"),
+                "stem":      stem,
+                "status":    meta.get("status", STATUS_PENDING),
+                "has_json":  meta.get("has_json", False),
+                "has_error": meta.get("has_error", False),
+                "has_hieroglyphs": meta.get("has_hieroglyphs", False),
             })
+
     else:
         seen_stems = set()
 
-        # First pass: cards that have an image file (with or without JSON)
+        # First pass: cards that have an image file
         for img_path in sorted(UPLOADS_DIR.iterdir()):
             if not img_path.is_file() or img_path.suffix.lower() not in IMAGE_EXTENSIONS:
                 continue
@@ -113,28 +182,27 @@ def list_cards() -> list[dict]:
                     data = {}
             cards.append({
                 "image_path": img_path,
-                "json_path": json_path,
-                "name": img_path.name,
-                "stem": stem,
-                "status": data.get("_review_status", STATUS_PENDING) if data else "not_transcribed",
-                "has_json": json_path.exists(),
-                "has_error": "error" in data,
+                "json_path":  json_path,
+                "name":       img_path.name,
+                "stem":       stem,
+                "status":     data.get("_review_status", STATUS_PENDING) if data else "not_transcribed",
+                "has_json":   json_path.exists(),
+                "has_error":  "error" in data,
                 "has_hieroglyphs": bool(data.get("Hieroglyphs_Present", False)),
             })
 
-        # Second pass: JSON-only cards (batch-imported transcriptions without a matching image yet)
+        # Second pass: JSON-only cards
         for json_path in sorted(TRANSCRIPTIONS_DIR.iterdir()):
             if not json_path.is_file() or json_path.suffix.lower() != ".json":
                 continue
             stem = json_path.stem
             if stem in seen_stems:
-                continue  # already covered above
+                continue
             data = {}
             try:
                 data = json.loads(json_path.read_text(encoding="utf-8"))
             except Exception:
                 data = {}
-            # Try to find a matching image with any supported extension
             img_path = None
             for ext in IMAGE_EXTENSIONS:
                 candidate = UPLOADS_DIR / (stem + ext)
@@ -142,13 +210,13 @@ def list_cards() -> list[dict]:
                     img_path = candidate
                     break
             cards.append({
-                "image_path": img_path,  # may be None if image not yet uploaded
-                "json_path": json_path,
-                "name": stem + (img_path.suffix if img_path else ".json"),
-                "stem": stem,
-                "status": data.get("_review_status", STATUS_PENDING) if data else STATUS_PENDING,
-                "has_json": True,
-                "has_error": "error" in data,
+                "image_path": img_path,
+                "json_path":  json_path,
+                "name":       stem + (img_path.suffix if img_path else ".json"),
+                "stem":       stem,
+                "status":     data.get("_review_status", STATUS_PENDING) if data else STATUS_PENDING,
+                "has_json":   True,
+                "has_error":  "error" in data,
                 "has_hieroglyphs": bool(data.get("Hieroglyphs_Present", False)),
             })
 
@@ -156,7 +224,10 @@ def list_cards() -> list[dict]:
 
 
 def load_json(card: dict) -> dict:
-    backend = _get_backend()
+    try:
+        backend = _get_backend()
+    except Exception:
+        backend = None
     try:
         if backend and card.get("json_id"):
             return json.loads(backend.get_file_content(card["json_id"]))
@@ -168,21 +239,43 @@ def load_json(card: dict) -> dict:
 
 
 def save_json(card_stem: str, data: dict):
-    backend = _get_backend()
+    try:
+        backend = _get_backend()
+    except Exception:
+        backend = None
+
     filename = f"{card_stem}.json"
-    content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+
     if backend:
-        backend.upsert_json(filename, data, backend.transcriptions_id)
+        new_id = backend.upsert_json(filename, data, backend.transcriptions_id)
+        # Update the index with the latest metadata so future list_cards() is accurate
+        index = _load_drive_index(backend)
+        entry = index.get(card_stem, {})
+        entry.update({
+            "json_id":        new_id,
+            "has_json":       True,
+            "has_error":      "error" in data,
+            "has_hieroglyphs": bool(data.get("Hieroglyphs_Present", False)),
+            "status":         data.get("_review_status", STATUS_PENDING),
+        })
+        if "image_name" not in entry:
+            entry["image_name"] = card_stem + ".jpg"
+        index[card_stem] = entry
+        _save_drive_index(backend, index)
     else:
+        content = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
         (TRANSCRIPTIONS_DIR / filename).write_bytes(content)
 
 
 def get_image_bytes(card: dict) -> bytes:
-    backend = _get_backend()
+    try:
+        backend = _get_backend()
+    except Exception:
+        backend = None
     try:
         if backend and card.get("image_id"):
             return backend.get_file_content(card["image_id"])
-        elif not backend and card.get("image_path"):
+        elif not backend and card.get("image_path") and card["image_path"]:
             return card["image_path"].read_bytes()
     except Exception:
         pass
@@ -190,21 +283,42 @@ def get_image_bytes(card: dict) -> bytes:
 
 
 def save_uploaded_file(uploaded_file):
-    backend = _get_backend()
+    try:
+        backend = _get_backend()
+    except Exception:
+        backend = None
+
     if backend:
-        backend.upload_bytes(
+        new_id = backend.upload_bytes(
             uploaded_file.name,
             bytes(uploaded_file.getbuffer()),
             backend.uploads_id,
         )
+        # Update index to record the image
+        stem = Path(uploaded_file.name).stem
+        index = _load_drive_index(backend)
+        entry = index.get(stem, {})
+        entry.update({
+            "image_id":   new_id,
+            "image_name": uploaded_file.name,
+        })
+        if "status" not in entry:
+            entry["status"] = "not_transcribed"
+        if "has_json" not in entry:
+            entry["has_json"] = False
+        index[stem] = entry
+        _save_drive_index(backend, index)
     else:
         (UPLOADS_DIR / uploaded_file.name).write_bytes(uploaded_file.getbuffer())
 
 
-# --- Other helpers ---
+# ---------------------------------------------------------------------------
+# Other helpers
+# ---------------------------------------------------------------------------
 
 def count_by_status() -> dict:
-    counts = {"total": 0, STATUS_PENDING: 0, STATUS_REVIEWED: 0, STATUS_FLAGGED: 0, STATUS_ERROR: 0, "not_transcribed": 0}
+    counts = {"total": 0, STATUS_PENDING: 0, STATUS_REVIEWED: 0,
+              STATUS_FLAGGED: 0, STATUS_ERROR: 0, "not_transcribed": 0}
     for card in list_cards():
         counts["total"] += 1
         s = card["status"]
@@ -229,9 +343,9 @@ def append_to_csv(image_name: str, data: dict):
         if not file_exists:
             writer.writeheader()
         row = {
-            "image": image_name,
+            "image":    image_name,
             "reviewed_at": datetime.now(timezone.utc).isoformat(),
-            "status": data.get("_review_status", STATUS_REVIEWED),
+            "status":   data.get("_review_status", STATUS_REVIEWED),
             "Hieroglyphs_Present": data.get("Hieroglyphs_Present", False),
         }
         for field in EDITABLE_FIELDS:
@@ -251,9 +365,9 @@ def rebuild_csv() -> Path:
         writer.writeheader()
         for image_name, data in reviewed:
             row = {
-                "image": image_name,
+                "image":       image_name,
                 "reviewed_at": data.get("_reviewed_at", ""),
-                "status": data.get("_review_status", ""),
+                "status":      data.get("_review_status", ""),
                 "Hieroglyphs_Present": data.get("Hieroglyphs_Present", False),
             }
             for field in EDITABLE_FIELDS:
